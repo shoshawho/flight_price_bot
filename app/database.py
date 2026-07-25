@@ -1,9 +1,14 @@
+import os
+from pathlib import Path
+
 import aiosqlite
 
-DB_PATH = "data/flights.db"
+DB_DIR = Path("data")
+DB_PATH = DB_DIR / "flights.db"
 
 
 async def init_db() -> None:
+    DB_DIR.mkdir(exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
