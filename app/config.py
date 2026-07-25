@@ -23,7 +23,7 @@ def load_config() -> Config:
         raise ValueError("BOT_TOKEN не задан")
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
-        raise ValueError("DATABASE_URL не задан")
+        database_url = "sqlite"
     avia_token = os.getenv("AVIA_API_TOKEN") or None
     proxy = os.getenv("BOT_PROXY") or None
     return Config(bot_token=bot_token, database_url=database_url, avia_token=avia_token, proxy=proxy)
