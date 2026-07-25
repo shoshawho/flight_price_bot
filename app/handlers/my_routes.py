@@ -11,7 +11,8 @@ async def show_routes(callback: CallbackQuery) -> None:
     async with get_db() as db:
         cursor = await db.execute(
             """
-            SELECT routes.id, routes.passengers, routes.last_price, routes.baggage
+            SELECT routes.id, routes.passengers, routes.last_price,
+                   routes.baggage, routes.notify_hour
             FROM routes
             JOIN users ON routes.user_id = users.id
             WHERE users.telegram_id = ?
@@ -26,11 +27,11 @@ async def show_routes(callback: CallbackQuery) -> None:
         return
 
     lines = []
-    for route_id, passengers, last_price, baggage in routes:
+    for route_id, passengers, last_price, baggage, notify_hour in routes:
         async with get_db() as db:
             cursor = await db.execute(
                 """
-                SELECT origin, destination, date
+                SELECT origin, destination, date, transit_name
                 FROM segments
                 WHERE route_id = ?
                 ORDER BY sort_order
@@ -42,16 +43,24 @@ async def show_routes(callback: CallbackQuery) -> None:
         if not segs:
             continue
 
-        route_str = " → ".join(f"{s[0]}→{s[2]}" for s in segs)
+        parts = []
+        for s in segs:
+            seg_str = f"{s[0]} → {s[1]}"
+            if s[3]:
+                seg_str += f" (через {s[3]})"
+            parts.append(seg_str)
+        route_str = " → ".join(parts)
         dates = ", ".join(s[2] for s in segs)
         price = f"{last_price:.0f} руб." if last_price else "ещё не проверялась"
         baggage_label = "с багажом" if baggage else "ручная кладь"
+        notify_label = f"{notify_hour}:00" if notify_hour is not None else "—"
 
         lines.append(
             f"🚀 {route_str}\n"
             f"📅 {dates}\n"
             f"👤 {passengers} чел.\n"
             f"🧳 {baggage_label}\n"
+            f"⏰ Уведомления в {notify_label}\n"
             f"💰 {price}"
         )
 

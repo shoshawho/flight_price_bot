@@ -23,6 +23,8 @@ async def init_db() -> None:
                 last_price REAL,
                 passengers INTEGER NOT NULL DEFAULT 1,
                 baggage INTEGER NOT NULL DEFAULT 0,
+                notify_hour INTEGER DEFAULT 10,
+                last_checked TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
@@ -36,13 +38,17 @@ async def init_db() -> None:
                 dest_code TEXT NOT NULL,
                 date TEXT NOT NULL,
                 sort_order INTEGER NOT NULL DEFAULT 0,
+                transit_code TEXT,
+                transit_name TEXT,
+                min_layover INTEGER,
+                max_layover INTEGER,
                 FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE
             )
         """)
 
-        for col in ("baggage",):
+        for col in ("notify_hour", "last_checked"):
             try:
-                await db.execute(f"ALTER TABLE routes ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+                await db.execute(f"ALTER TABLE routes ADD COLUMN {col} INTEGER DEFAULT NULL")
             except aiosqlite.OperationalError:
                 pass
 

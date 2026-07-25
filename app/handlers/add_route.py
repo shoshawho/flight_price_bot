@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -20,9 +21,12 @@ class AddRoute(StatesGroup):
     origin = State()
     destination = State()
     date = State()
+    transit = State()
+    layover = State()
     add_leg = State()
     passengers = State()
     baggage = State()
+    notify_time = State()
 
 
 def _parse_date(raw: str) -> datetime | None:
@@ -44,6 +48,24 @@ def _baggage_kb():
     builder.button(text="Ручная кладь", callback_data="baggage_0")
     builder.button(text="С багажом", callback_data="baggage_1")
     return builder.as_markup()
+
+
+def _notify_kb():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🌅 Утром (07:00)", callback_data="notify_7")
+    builder.button(text="☀️ Днём (13:00)", callback_data="notify_13")
+    builder.button(text="🌆 Вечером (19:00)", callback_data="notify_19")
+    return builder.as_markup()
+
+
+def _format_route(legs: list[dict]) -> str:
+    parts = []
+    for l in legs:
+        seg = f"{l['origin']} → {l['destination']}"
+        if l.get("transit_code"):
+            seg += f" (через {l['transit_name'] or l['transit_code']})"
+        parts.append(seg)
+    return " → ".join(parts)
 
 
 @router.callback_query(F.data == "add_route")
@@ -103,25 +125,101 @@ async def process_date(message: Message, state: FSMContext) -> None:
             await message.answer("Дата должна быть позже предыдущего сегмента.")
             return
 
+    await state.update_data(_tmp_date=message.text.strip())
+    await message.answer(
+        "Введите город или страну пересадки (или '-' чтобы пропустить):\n"
+        "Например: Дубай"
+    )
+    await state.set_state(AddRoute.transit)
+
+
+@router.message(AddRoute.transit)
+async def process_transit(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    raw = message.text.strip()
+    transit_code = None
+    transit_name = None
+
+    if raw != "-":
+        transit_code = await resolve_city(raw)
+        if not transit_code:
+            await message.answer(
+                "Не удалось найти такой город. Введите снова или '-' чтобы пропустить:"
+            )
+            return
+        transit_name = raw
+
     leg = {
         "origin": data["origin"],
         "origin_code": data["origin_code"],
         "destination": data["destination"],
         "dest_code": data["dest_code"],
-        "date": message.text.strip(),
+        "date": data["_tmp_date"],
+        "transit_code": transit_code,
+        "transit_name": transit_name,
+        "min_layover": None,
+        "max_layover": None,
     }
+    await state.update_data(_pending_leg=leg)
+
+    if transit_code:
+        await message.answer(
+            "Введите мин. и макс. время пересадки в часах через пробел\n"
+            "Например: 1 4 (от 1 до 4 часов) или '-' чтобы пропустить:"
+        )
+        await state.set_state(AddRoute.layover)
+    else:
+        await _finalize_leg(message, state, leg)
+
+
+@router.message(AddRoute.layover)
+async def process_layover(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    leg = data.get("_pending_leg")
+    if not leg:
+        await state.set_state(AddRoute.origin)
+        await message.answer("Что-то пошло не так. Начните заново.")
+        return
+
+    raw = message.text.strip()
+    if raw != "-":
+        match = re.match(r"^\s*(\d+)\s+(\d+)\s*$", raw)
+        if not match:
+            await message.answer(
+                "Введите два числа через пробел (мин макс) или '-':"
+            )
+            return
+        min_h, max_h = int(match.group(1)), int(match.group(2))
+        if min_h < 0 or max_h <= min_h:
+            await message.answer("Минимум должен быть >= 0, максимум > минимума.")
+            return
+        leg["min_layover"] = min_h * 60
+        leg["max_layover"] = max_h * 60
+
+    await _finalize_leg(message, state, leg)
+
+
+async def _finalize_leg(msg: Message, state: FSMContext, leg: dict) -> None:
+    data = await state.get_data()
+    legs = data.get("legs", [])
     legs.append(leg)
     await state.update_data(legs=legs)
     await state.update_data(origin=data["destination"], origin_code=data["dest_code"])
-    await message.answer(
-        f"Сегмент добавлен: {leg['origin']} → {leg['destination']} ({leg['date']})\n"
+    await state.set_data({k: v for k, v in (await state.get_data()).items()
+                          if k not in ("_tmp_date", "_pending_leg")})
+
+    transit_info = ""
+    if leg.get("transit_code"):
+        transit_info = f" через {leg['transit_name'] or leg['transit_code']}"
+    await msg.answer(
+        f"Сегмент добавлен: {leg['origin']} → {leg['destination']} ({leg['date']}){transit_info}\n"
         "Добавить ещё один перелёт?",
         reply_markup=_yes_no_kb(),
     )
     await state.set_state(AddRoute.add_leg)
 
 
-@router.callback_query(AddRoute.add_leg)
+@router.callback_query(AddRoute.add_leg, F.data.in_({"leg_yes", "leg_no"}))
 async def process_add_leg(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.data == "leg_yes":
         await callback.message.edit_text("Введите следующий город назначения:")
@@ -145,10 +243,22 @@ async def process_passengers(message: Message, state: FSMContext) -> None:
     await state.set_state(AddRoute.baggage)
 
 
-@router.callback_query(AddRoute.baggage)
+@router.callback_query(AddRoute.baggage, F.data.startswith("baggage_"))
 async def process_baggage(callback: CallbackQuery, state: FSMContext) -> None:
     baggage = int(callback.data.split("_")[1])
-    data = await state.update_data(baggage=baggage)
+    await state.update_data(baggage=baggage)
+    await callback.message.edit_text(
+        "Выберите удобное время для уведомлений:",
+        reply_markup=_notify_kb(),
+    )
+    await state.set_state(AddRoute.notify_time)
+    await callback.answer()
+
+
+@router.callback_query(AddRoute.notify_time, F.data.startswith("notify_"))
+async def process_notify_time(callback: CallbackQuery, state: FSMContext) -> None:
+    hour = int(callback.data.split("_")[1])
+    data = await state.update_data(notify_hour=hour)
     legs = data["legs"]
     avia_token = data.get("_avia_token", "")
 
@@ -164,11 +274,10 @@ async def process_baggage(callback: CallbackQuery, state: FSMContext) -> None:
 
     await state.clear()
 
-    route_str = " → ".join(f"{l['origin']}→{l['destination']}" for l in legs)
-    baggage_label = "с багажом" if baggage else "ручная кладь"
+    baggage_label = "с багажом" if data.get("baggage") else "ручная кладь"
     await callback.message.edit_text(
         f"Маршрут сохранён!\n"
-        f"{route_str}\n"
+        f"{_format_route(legs)}\n"
         f"👤 {data['passengers']} чел.\n"
         f"🧳 {baggage_label}\n"
         "Ищу цены..."
@@ -183,7 +292,10 @@ async def process_baggage(callback: CallbackQuery, state: FSMContext) -> None:
                 date_from=leg["date"],
                 token=avia_token,
                 one_way=True,
-                baggage=baggage,
+                baggage=data.get("baggage", 0),
+                transit_code=leg.get("transit_code"),
+                min_layover=leg.get("min_layover"),
+                max_layover=leg.get("max_layover"),
             )
             if price is None:
                 total = None
@@ -198,13 +310,13 @@ async def process_baggage(callback: CallbackQuery, state: FSMContext) -> None:
             if route_id:
                 async with get_db() as db:
                     await db.execute(
-                        "UPDATE routes SET last_price = ? WHERE id = ?",
+                        "UPDATE routes SET last_price = ?, last_checked = CURRENT_TIMESTAMP WHERE id = ?",
                         (total, route_id),
                     )
                     await db.commit()
         else:
             await callback.message.answer(
-                "Не удалось получить цену. Попробуйте позже или проверьте логи."
+                "Не удалось получить цену. Попробуйте позже."
             )
 
     await callback.answer()
@@ -225,8 +337,8 @@ async def save_route(telegram_id: int, data: dict) -> int:
             user_id = cursor.lastrowid
 
         cursor = await db.execute(
-            "INSERT INTO routes (user_id, passengers, baggage) VALUES (?, ?, ?)",
-            (user_id, data["passengers"], data.get("baggage", 0)),
+            "INSERT INTO routes (user_id, passengers, baggage, notify_hour) VALUES (?, ?, ?, ?)",
+            (user_id, data["passengers"], data.get("baggage", 0), data.get("notify_hour", 10)),
         )
         route_id = cursor.lastrowid
 
@@ -234,8 +346,10 @@ async def save_route(telegram_id: int, data: dict) -> int:
             await db.execute(
                 """
                 INSERT INTO segments
-                    (route_id, origin, origin_code, destination, dest_code, date, sort_order)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (route_id, origin, origin_code, destination, dest_code,
+                     date, sort_order, transit_code, transit_name,
+                     min_layover, max_layover)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     route_id,
@@ -245,6 +359,10 @@ async def save_route(telegram_id: int, data: dict) -> int:
                     leg["dest_code"],
                     leg["date"],
                     i + 1,
+                    leg.get("transit_code"),
+                    leg.get("transit_name"),
+                    leg.get("min_layover"),
+                    leg.get("max_layover"),
                 ),
             )
         await db.commit()
