@@ -10,4 +10,7 @@ def main_menu() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="Мои маршруты", callback_data="my_routes")
     )
+    builder.row(
+        InlineKeyboardButton(text="🔄 Обновить цены", callback_data="refresh_prices")
+    )
     return builder.as_markup()
