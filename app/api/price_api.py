@@ -7,6 +7,14 @@ import aiohttp
 API_URL = "https://api.travelpayouts.com/aviasales/v3/prices_for_dates"
 
 
+def _fmt_date(d: str) -> str:
+    """Преобразует ДД.ММ.ГГГГ → ГГГГ-ММ-ДД"""
+    parts = d.strip().split(".")
+    if len(parts) == 3:
+        return f"{parts[2]}-{parts[1]}-{parts[0]}"
+    return d
+
+
 async def fetch_price(
     origin_code: str,
     dest_code: str,
@@ -23,7 +31,7 @@ async def fetch_price(
     params = {
         "origin": origin_code,
         "destination": dest_code,
-        "departure_at": date_from,
+        "departure_at": _fmt_date(date_from),
         "one_way": "true" if one_way else "false",
         "sorting": "price",
         "direct": "false",
@@ -34,7 +42,7 @@ async def fetch_price(
     if baggage == 1:
         params["baggage"] = "1"
     if date_to and not one_way:
-        params["return_at"] = date_to
+        params["return_at"] = _fmt_date(date_to)
 
     try:
         async with aiohttp.ClientSession() as session:
