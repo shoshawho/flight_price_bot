@@ -19,7 +19,7 @@ async def main() -> None:
         os.environ["HTTPS_PROXY"] = config.proxy
         logging.info("Прокси установлен: %s", config.proxy)
 
-    await init_db()
+    await init_db(config.database_url)
 
     bot, dp = setup_bot(config)
 

@@ -1,37 +1,36 @@
 import logging
-from pathlib import Path
+from contextlib import asynccontextmanager
 
-import aiosqlite
+import asyncpg
 
-DB_DIR = Path("data")
-DB_PATH = DB_DIR / "flights.db"
+_pool: asyncpg.Pool | None = None
 
 
-async def init_db() -> None:
-    DB_DIR.mkdir(exist_ok=True)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+async def init_db(database_url: str) -> None:
+    global _pool
+    _pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
+    async with _pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY,
-                telegram_id INTEGER UNIQUE NOT NULL
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE NOT NULL
             )
         """)
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS routes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                last_price REAL,
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                last_price DOUBLE PRECISION,
                 passengers INTEGER NOT NULL DEFAULT 1,
                 baggage INTEGER NOT NULL DEFAULT 0,
                 notify_hour INTEGER DEFAULT 10,
-                last_checked TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id)
+                last_checked TIMESTAMP
             )
         """)
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS segments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                route_id INTEGER NOT NULL,
+                id SERIAL PRIMARY KEY,
+                route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
                 origin TEXT NOT NULL,
                 origin_code TEXT NOT NULL,
                 destination TEXT NOT NULL,
@@ -41,20 +40,15 @@ async def init_db() -> None:
                 transit_code TEXT,
                 transit_name TEXT,
                 min_layover INTEGER,
-                max_layover INTEGER,
-                FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE
+                max_layover INTEGER
             )
         """)
-
-        for col in ("notify_hour", "last_checked"):
-            try:
-                await db.execute(f"ALTER TABLE routes ADD COLUMN {col} INTEGER DEFAULT NULL")
-            except aiosqlite.OperationalError:
-                pass
-
-        await db.commit()
-        logging.info("База данных инициализирована")
+        logging.info("База данных инициализирована (PostgreSQL)")
 
 
-def get_db() -> aiosqlite.Connection:
-    return aiosqlite.connect(DB_PATH)
+@asynccontextmanager
+async def get_db():
+    if _pool is None:
+        raise RuntimeError("Database pool not initialized")
+    async with _pool.acquire() as conn:
+        yield conn

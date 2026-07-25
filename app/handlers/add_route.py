@@ -315,12 +315,11 @@ async def process_notify_time(callback: CallbackQuery, state: FSMContext) -> Non
                 f"💰 Текущая минимальная цена: {total:.0f} руб."
             )
             if route_id:
-                async with get_db() as db:
-                    await db.execute(
-                        "UPDATE routes SET last_price = ?, last_checked = CURRENT_TIMESTAMP WHERE id = ?",
-                        (total, route_id),
+                async with get_db() as conn:
+                    await conn.execute(
+                        "UPDATE routes SET last_price = $1, last_checked = CURRENT_TIMESTAMP WHERE id = $2",
+                        total, route_id,
                     )
-                    await db.commit()
         else:
             await callback.message.answer(
                 "Не удалось получить цену. Попробуйте позже."
@@ -330,47 +329,42 @@ async def process_notify_time(callback: CallbackQuery, state: FSMContext) -> Non
 
 
 async def save_route(telegram_id: int, data: dict) -> int:
-    async with get_db() as db:
-        cursor = await db.execute(
-            "SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)
+    async with get_db() as conn:
+        row = await conn.fetchrow(
+            "SELECT id FROM users WHERE telegram_id = $1", telegram_id
         )
-        row = await cursor.fetchone()
         if row:
-            user_id = row[0]
+            user_id = row["id"]
         else:
-            cursor = await db.execute(
-                "INSERT INTO users (telegram_id) VALUES (?)", (telegram_id,)
+            user_id = await conn.fetchval(
+                "INSERT INTO users (telegram_id) VALUES ($1) RETURNING id",
+                telegram_id,
             )
-            user_id = cursor.lastrowid
 
-        cursor = await db.execute(
-            "INSERT INTO routes (user_id, passengers, baggage, notify_hour) VALUES (?, ?, ?, ?)",
-            (user_id, data["passengers"], data.get("baggage", 0), data.get("notify_hour", 10)),
+        route_id = await conn.fetchval(
+            "INSERT INTO routes (user_id, passengers, baggage, notify_hour) VALUES ($1, $2, $3, $4) RETURNING id",
+            user_id, data["passengers"], data.get("baggage", 0), data.get("notify_hour", 10),
         )
-        route_id = cursor.lastrowid
 
         for i, leg in enumerate(data["legs"]):
-            await db.execute(
+            await conn.execute(
                 """
                 INSERT INTO segments
                     (route_id, origin, origin_code, destination, dest_code,
                      date, sort_order, transit_code, transit_name,
                      min_layover, max_layover)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
-                (
-                    route_id,
-                    leg["origin"],
-                    leg["origin_code"],
-                    leg["destination"],
-                    leg["dest_code"],
-                    leg["date"],
-                    i + 1,
-                    leg.get("transit_code"),
-                    leg.get("transit_name"),
-                    leg.get("min_layover"),
-                    leg.get("max_layover"),
-                ),
+                route_id,
+                leg["origin"],
+                leg["origin_code"],
+                leg["destination"],
+                leg["dest_code"],
+                leg["date"],
+                i + 1,
+                leg.get("transit_code"),
+                leg.get("transit_name"),
+                leg.get("min_layover"),
+                leg.get("max_layover"),
             )
-        await db.commit()
         return route_id
