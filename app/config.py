@@ -1,3 +1,4 @@
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,10 @@ def load_config() -> Config:
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         database_url = "sqlite"
-    avia_token = os.getenv("AVIA_API_TOKEN") or None
+
+    raw = os.environ.get("AVIA_API_TOKEN", "")
+    logging.info("RAW AVIA_API_TOKEN len=%d prefix=%s", len(raw), raw[:8] if raw else "EMPTY")
+    avia_token = raw or None
+
     proxy = os.getenv("BOT_PROXY") or None
     return Config(bot_token=bot_token, database_url=database_url, avia_token=avia_token, proxy=proxy)
