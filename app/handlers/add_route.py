@@ -284,8 +284,12 @@ async def process_notify_time(callback: CallbackQuery, state: FSMContext) -> Non
     )
 
     if avia_token:
+        logging.info("Проверка цены для %d сегментов, токен=%s...",
+                     len(legs), avia_token[:8])
         total = 0.0
         for leg in legs:
+            logging.info("Запрос цены: %s->%s (%s)",
+                         leg["origin_code"], leg["dest_code"], leg["date"])
             price = await fetch_price(
                 origin_code=leg["origin_code"],
                 dest_code=leg["dest_code"],
@@ -298,9 +302,12 @@ async def process_notify_time(callback: CallbackQuery, state: FSMContext) -> Non
                 max_layover=leg.get("max_layover"),
             )
             if price is None:
+                logging.warning("Цена не получена для сегмента %s->%s",
+                                leg["origin_code"], leg["dest_code"])
                 total = None
                 break
             total += price
+            logging.info("Цена сегмента: %.0f руб.", price)
 
         if total is not None:
             total *= data["passengers"]
