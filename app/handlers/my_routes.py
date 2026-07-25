@@ -11,7 +11,7 @@ async def show_routes(callback: CallbackQuery) -> None:
     async with get_db() as db:
         cursor = await db.execute(
             """
-            SELECT origin, destination, date_from, date_to, passengers, last_price
+            SELECT routes.id, routes.passengers, routes.last_price
             FROM routes
             JOIN users ON routes.user_id = users.id
             WHERE users.telegram_id = ?
@@ -26,12 +26,30 @@ async def show_routes(callback: CallbackQuery) -> None:
         return
 
     lines = []
-    for r in routes:
-        price = f"{r[5]:.0f} руб." if r[5] else "ещё не проверялась"
+    for route_id, passengers, last_price in routes:
+        async with get_db() as db:
+            cursor = await db.execute(
+                """
+                SELECT origin, destination, date
+                FROM segments
+                WHERE route_id = ?
+                ORDER BY sort_order
+                """,
+                (route_id,),
+            )
+            segs = await cursor.fetchall()
+
+        if not segs:
+            continue
+
+        route_str = " → ".join(f"{s[0]}→{s[2]}" for s in segs)
+        dates = ", ".join(s[2] for s in segs)
+        price = f"{last_price:.0f} руб." if last_price else "ещё не проверялась"
+
         lines.append(
-            f"{r[0]} → {r[1]}\n"
-            f"📅 {r[2]} – {r[3]}\n"
-            f"👤 {r[4]} чел.\n"
+            f"🚀 {route_str}\n"
+            f"📅 {dates}\n"
+            f"👤 {passengers} чел.\n"
             f"💰 {price}"
         )
 

@@ -18,61 +18,72 @@ async def check_prices(bot: Bot, avia_token: str | None) -> None:
     async with get_db() as db:
         cursor = await db.execute(
             """
-            SELECT routes.id, users.telegram_id, origin, destination, origin_code,
-                   dest_code, date_from, date_to, passengers, last_price
+            SELECT routes.id, users.telegram_id, routes.passengers, routes.last_price
             FROM routes
             JOIN users ON routes.user_id = users.id
             """
         )
-        rows = await cursor.fetchall()
+        routes = await cursor.fetchall()
 
-    for row in rows:
-        (
-            route_id,
-            tg_id,
-            origin_name,
-            dest_name,
-            origin_code,
-            dest_code,
-            df,
-            dt,
-            passengers,
-            last_price,
-        ) = row
-
-        try:
-            new_price = await fetch_price(
-                origin_code=origin_code,
-                dest_code=dest_code,
-                date_from=df,
-                date_to=dt,
-                token=avia_token,
-                passengers=passengers,
+    for route_id, tg_id, passengers, last_price in routes:
+        async with get_db() as db:
+            cursor = await db.execute(
+                """
+                SELECT origin, origin_code, destination, dest_code, date
+                FROM segments
+                WHERE route_id = ?
+                ORDER BY sort_order
+                """,
+                (route_id,),
             )
-        except Exception:
-            logging.exception("Ошибка при запросе цены для маршрута #%s", route_id)
+            segs = await cursor.fetchall()
+
+        if not segs:
             continue
 
-        if new_price is None:
+        total_price = 0.0
+        for origin_name, origin_code, dest_name, dest_code, date_str in segs:
+            try:
+                price = await fetch_price(
+                    origin_code=origin_code,
+                    dest_code=dest_code,
+                    date_from=date_str,
+                    token=avia_token,
+                    one_way=True,
+                )
+            except Exception:
+                logging.exception("Ошибка при запросе цены для сегмента #%s", route_id)
+                price = None
+
+            if price is None:
+                total_price = None
+                break
+            total_price += price
+
+        if total_price is None:
             continue
 
-        if new_price != last_price:
+        total_price *= passengers
+
+        if total_price != last_price:
             async with get_db() as db:
                 await db.execute(
                     "UPDATE routes SET last_price = ? WHERE id = ?",
-                    (new_price, route_id),
+                    (total_price, route_id),
                 )
                 await db.commit()
 
             if last_price is not None:
-                direction = "📈 Выросла" if new_price > last_price else "📉 Снизилась"
+                direction = "📈 Выросла" if total_price > last_price else "📉 Снизилась"
+                route_str = " → ".join(
+                    f"{s[0]}→{s[2]}" for s in segs
+                )
                 try:
                     await bot.send_message(
                         tg_id,
-                        f"{direction} цена на маршрут {origin_name} → {dest_name}\n"
+                        f"{direction} цена на маршрут {route_str}\n"
                         f"Было: {last_price:.0f} руб.\n"
-                        f"Стало: {new_price:.0f} руб.\n"
-                        f"Даты: {df} – {dt}",
+                        f"Стало: {total_price:.0f} руб.",
                     )
                 except Exception:
                     logging.warning(

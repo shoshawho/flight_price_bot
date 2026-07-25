@@ -10,22 +10,24 @@ async def fetch_price(
     origin_code: str,
     dest_code: str,
     date_from: str,
-    date_to: str,
     token: str,
     passengers: int = 1,
+    date_to: str | None = None,
+    one_way: bool = False,
 ) -> Optional[float]:
     params = {
         "origin": origin_code,
         "destination": dest_code,
         "departure_at": date_from,
-        "return_at": date_to,
-        "one_way": "false",
+        "one_way": "true" if one_way else "false",
         "sorting": "price",
         "direct": "false",
         "currency": "rub",
         "limit": 1,
         "token": token,
     }
+    if date_to and not one_way:
+        params["return_at"] = date_to
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -40,7 +42,7 @@ async def fetch_price(
 
     data = body.get("data") or []
     if not data:
-        logging.info("Нет цен для %s-%s на %s..%s", origin_code, dest_code, date_from, date_to)
+        logging.info("Нет цен для %s-%s на %s", origin_code, dest_code, date_from)
         return None
 
     best = data[0]
