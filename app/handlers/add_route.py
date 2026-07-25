@@ -9,6 +9,8 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.api.iata import resolve_city
+from app.api.price_api import fetch_price
+from app.config import load_config
 from app.database import get_db
 
 router = Router()
@@ -20,6 +22,7 @@ class AddRoute(StatesGroup):
     date = State()
     add_leg = State()
     passengers = State()
+    baggage = State()
 
 
 def _parse_date(raw: str) -> datetime | None:
@@ -36,15 +39,17 @@ def _yes_no_kb():
     return builder.as_markup()
 
 
-def _format_segments(data: dict[str, Any]) -> str:
-    legs = data.get("legs", [])
-    lines = [f"{l['origin']} → {l['destination']} ({l['date']})" for l in legs]
-    return " → ".join(l.replace(" → ", "→").rsplit("→", 1))
+def _baggage_kb():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Ручная кладь", callback_data="baggage_0")
+    builder.button(text="С багажом", callback_data="baggage_1")
+    return builder.as_markup()
 
 
 @router.callback_query(F.data == "add_route")
 async def add_route_start(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_data({"legs": []})
+    config = load_config()
+    await state.set_data({"legs": [], "_avia_token": config.avia_token or ""})
     await callback.message.edit_text("Введите город отправления:")
     await state.set_state(AddRoute.origin)
     await callback.answer()
@@ -86,10 +91,6 @@ async def process_date(message: Message, state: FSMContext) -> None:
     if not dt:
         await message.answer("Неверный формат. Введите дату как ДД.ММ.ГГГГ (например, 15.06.2026):")
         return
-    if dt.date() < datetime.now().date():
-        await message.answer("Дата вылета уже прошла. Введите будущую дату.")
-        return
-
     if dt.date() < datetime.now().date():
         await message.answer("Дата вылета уже прошла. Введите будущую дату.")
         return
@@ -136,35 +137,80 @@ async def process_passengers(message: Message, state: FSMContext) -> None:
     if not message.text.isdigit() or int(message.text) < 1:
         await message.answer("Введите число больше 0.")
         return
+    await state.update_data(passengers=int(message.text))
+    await message.answer(
+        "Выберите тип багажа:",
+        reply_markup=_baggage_kb(),
+    )
+    await state.set_state(AddRoute.baggage)
 
-    data = await state.update_data(passengers=int(message.text))
 
+@router.callback_query(AddRoute.baggage)
+async def process_baggage(callback: CallbackQuery, state: FSMContext) -> None:
+    baggage = int(callback.data.split("_")[1])
+    data = await state.update_data(baggage=baggage)
+    legs = data["legs"]
+    avia_token = data.get("_avia_token", "")
+
+    route_id = None
     try:
-        await save_route(message.from_user.id, data)
+        route_id = await save_route(callback.from_user.id, data)
     except Exception:
         logging.exception("Ошибка сохранения маршрута")
-        await message.answer("Что-то пошло не так. Попробуйте позже.")
+        await callback.message.edit_text("Что-то пошло не так. Попробуйте позже.")
         await state.clear()
+        await callback.answer()
         return
 
     await state.clear()
 
-    legs = data["legs"]
-    route_str = " → ".join(
-        f"{l['origin']}→{l['destination']}" for l in legs
-    )
-    if len(legs) > 1:
-        route_str = " → ".join(f"{l['origin']}→{l['destination']}" for l in legs)
-
-    await message.answer(
+    route_str = " → ".join(f"{l['origin']}→{l['destination']}" for l in legs)
+    baggage_label = "с багажом" if baggage else "ручная кладь"
+    await callback.message.edit_text(
         f"Маршрут сохранён!\n"
         f"{route_str}\n"
         f"👤 {data['passengers']} чел.\n"
-        "Буду следить за ценой."
+        f"🧳 {baggage_label}\n"
+        "Ищу цены..."
     )
 
+    if avia_token:
+        total = 0.0
+        for leg in legs:
+            price = await fetch_price(
+                origin_code=leg["origin_code"],
+                dest_code=leg["dest_code"],
+                date_from=leg["date"],
+                token=avia_token,
+                one_way=True,
+                baggage=baggage,
+            )
+            if price is None:
+                total = None
+                break
+            total += price
 
-async def save_route(telegram_id: int, data: dict) -> None:
+        if total is not None:
+            total *= data["passengers"]
+            await callback.message.answer(
+                f"💰 Текущая минимальная цена: {total:.0f} руб."
+            )
+            if route_id:
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE routes SET last_price = ? WHERE id = ?",
+                        (total, route_id),
+                    )
+                    await db.commit()
+        else:
+            await callback.message.answer(
+                "Не удалось получить цену. Попробуйте позже или проверьте логи."
+            )
+
+    await callback.answer()
+
+
+async def save_route(telegram_id: int, data: dict) -> int:
     async with get_db() as db:
         cursor = await db.execute(
             "SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)
@@ -179,8 +225,8 @@ async def save_route(telegram_id: int, data: dict) -> None:
             user_id = cursor.lastrowid
 
         cursor = await db.execute(
-            "INSERT INTO routes (user_id, passengers) VALUES (?, ?)",
-            (user_id, data["passengers"]),
+            "INSERT INTO routes (user_id, passengers, baggage) VALUES (?, ?, ?)",
+            (user_id, data["passengers"], data.get("baggage", 0)),
         )
         route_id = cursor.lastrowid
 
@@ -202,3 +248,4 @@ async def save_route(telegram_id: int, data: dict) -> None:
                 ),
             )
         await db.commit()
+        return route_id

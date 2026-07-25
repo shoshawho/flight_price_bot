@@ -14,6 +14,7 @@ async def fetch_price(
     passengers: int = 1,
     date_to: str | None = None,
     one_way: bool = False,
+    baggage: int = 0,
 ) -> Optional[float]:
     params = {
         "origin": origin_code,
@@ -26,6 +27,8 @@ async def fetch_price(
         "limit": 1,
         "token": token,
     }
+    if baggage == 1:
+        params["baggage"] = "1"
     if date_to and not one_way:
         params["return_at"] = date_to
 

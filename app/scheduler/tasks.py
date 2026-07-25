@@ -18,14 +18,15 @@ async def check_prices(bot: Bot, avia_token: str | None) -> None:
     async with get_db() as db:
         cursor = await db.execute(
             """
-            SELECT routes.id, users.telegram_id, routes.passengers, routes.last_price
+            SELECT routes.id, users.telegram_id, routes.passengers,
+                   routes.last_price, routes.baggage
             FROM routes
             JOIN users ON routes.user_id = users.id
             """
         )
         routes = await cursor.fetchall()
 
-    for route_id, tg_id, passengers, last_price in routes:
+    for route_id, tg_id, passengers, last_price, baggage in routes:
         async with get_db() as db:
             cursor = await db.execute(
                 """
@@ -50,6 +51,7 @@ async def check_prices(bot: Bot, avia_token: str | None) -> None:
                     date_from=date_str,
                     token=avia_token,
                     one_way=True,
+                    baggage=baggage,
                 )
             except Exception:
                 logging.exception("Ошибка при запросе цены для сегмента #%s", route_id)
